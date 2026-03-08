@@ -126,8 +126,8 @@ _idb() {
 device_shot() {
   local size=${1:-$IDB_SHOT_SIZE}
   _idb screenshot /tmp/device_raw.png 2>/dev/null
-  sips -Z "$size" /tmp/device_raw.png --out /tmp/device_screen.png -s format png 2>/dev/null
-  echo "/tmp/device_screen.png"
+  sips -Z "$size" /tmp/device_raw.png --out /tmp/device_screen.jpg -s format jpeg -s formatOptions 85 2>/dev/null
+  echo "/tmp/device_screen.jpg"
 }
 
 # ============ UI Tree (Accessibility) ============
