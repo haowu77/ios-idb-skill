@@ -125,14 +125,16 @@ device_select() {
 }
 
 _detect_screen_size() {
-  # Try to get screen size from idb describe (no screenshot needed)
+  # Get logical point dimensions from idb describe
+  # Output contains: width_points=393, height_points=852
   local desc
   desc=$(_idb describe 2>/dev/null)
-  local dims
-  dims=$(echo "$desc" | grep -oE '[0-9]+x[0-9]+' | head -1)
-  if [ -n "$dims" ]; then
-    IDB_SCREEN_W=$(echo "$dims" | cut -dx -f1)
-    IDB_SCREEN_H=$(echo "$dims" | cut -dx -f2)
+  local wp hp
+  wp=$(echo "$desc" | grep -oE 'width_points=[0-9]+' | head -1 | cut -d= -f2)
+  hp=$(echo "$desc" | grep -oE 'height_points=[0-9]+' | head -1 | cut -d= -f2)
+  if [ -n "$wp" ] && [ -n "$hp" ]; then
+    IDB_SCREEN_W="$wp"
+    IDB_SCREEN_H="$hp"
   fi
   # Fallback to common iPhone dimensions
   IDB_SCREEN_W=${IDB_SCREEN_W:-390}
@@ -142,8 +144,13 @@ _detect_screen_size() {
 # ============ idb Wrapper ============
 
 _idb() {
+  # idb requires --udid AFTER the subcommand(s), not as a global flag
+  # Append --udid at the end of the command, which works for all cases:
+  #   idb screenshot /tmp/out.png --udid UDID
+  #   idb ui describe-all --udid UDID
+  #   idb ui tap 100 200 --udid UDID
   if [ -n "$IDB_TARGET" ]; then
-    idb --udid "$IDB_TARGET" "$@"
+    idb "$@" --udid "$IDB_TARGET"
   else
     idb "$@"
   fi
@@ -153,15 +160,14 @@ _idb() {
 
 device_shot() {
   local size=${1:-$IDB_SHOT_SIZE}
-  if ! _idb screenshot /tmp/device_raw.png 2>/dev/null; then
-    echo "ERROR: screenshot failed. Is the target booted?" >&2
-    return 1
-  fi
+  rm -f /tmp/device_raw.png
+  local shot_err
+  shot_err=$(_idb screenshot /tmp/device_raw.png 2>&1)
   if [ ! -s /tmp/device_raw.png ]; then
-    echo "ERROR: screenshot file is empty" >&2
+    echo "ERROR: screenshot failed: $shot_err" >&2
     return 1
   fi
-  if ! sips -Z "$size" /tmp/device_raw.png --out /tmp/device_screen.jpg -s format jpeg -s formatOptions 85 2>/dev/null; then
+  if ! sips -Z "$size" /tmp/device_raw.png --out /tmp/device_screen.jpg -s format jpeg -s formatOptions 85 >/dev/null 2>&1; then
     echo "ERROR: image compression failed" >&2
     return 1
   fi
@@ -172,12 +178,25 @@ device_shot() {
 
 device_dump() {
   local output
-  output=$(_idb ui describe-all 2>&1)
+  output=$(_idb ui describe-all 2>/dev/null)
   if [ -z "$output" ]; then
     echo "ERROR: describe-all returned empty output. Is the target booted?" >&2
     return 1
   fi
-  echo "$output" > /tmp/ios_ui_tree.json
+  # idb sometimes outputs raw newlines inside JSON string values (invalid JSON)
+  # Replace literal newlines within strings with \n escape
+  echo "$output" | python3 -c "
+import sys
+raw = sys.stdin.buffer.read()
+# Fix: replace actual newlines that appear inside JSON strings
+# Strategy: since idb outputs a flat JSON array on one logical line,
+# any newline within the data is inside a string value
+text = raw.decode('utf-8', errors='replace')
+lines = text.splitlines()
+# Join all lines as they should be one JSON blob
+joined = ' '.join(lines)
+sys.stdout.write(joined)
+" > /tmp/ios_ui_tree.json 2>/dev/null
 }
 
 device_list() {
