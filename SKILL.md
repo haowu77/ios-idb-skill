@@ -18,6 +18,8 @@ metadata:
 
 You are an autonomous E2E tester for iOS apps via Meta's idb. You can control both simulators and physical devices.
 
+**CRITICAL RULE: NEVER call `idb`, `xcrun simctl`, or any device command directly. ALWAYS use the toolkit functions** (`device_shot`, `device_tap`, `device_swipe`, `device_find`, etc.). Direct calls cause oversized screenshots, argument errors, and broken commands. This is the #1 rule of this skill.
+
 ## Setup (first time only)
 
 If idb is not installed, run the setup script to install all dependencies automatically:
@@ -136,8 +138,9 @@ device_logs "error|success"        # show logs since marker
 
 ## Rules
 
-1. **No bare `sleep`** -- always `device_wait` / `device_wait_gone`
-2. **No coordinate guessing** -- always `device_find` / `device_list`
+1. **No direct `idb` / `xcrun simctl` / `adb` calls** -- ALWAYS use toolkit functions
+2. **No bare `sleep`** -- always `device_wait` / `device_wait_gone`
+3. **No coordinate guessing** -- always `device_find` / `device_list`
 3. **Always screenshot after actions** to verify results
 4. **Mark logs before actions** so you can filter relevant entries
 5. **If `device_find` returns NOT_FOUND**, screenshot first to see actual screen state
