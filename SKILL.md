@@ -97,6 +97,10 @@ device_back                   # swipe from left edge (iOS back gesture)
 device_home                   # press Home button
 ```
 
+**ALWAYS use toolkit functions** (`device_tap`, `device_swipe`, etc.) instead of calling `idb` directly. The toolkit handles argument formats correctly.
+
+**idb swipe syntax** (if you must call idb directly): `idb ui swipe X1 Y1 X2 Y2` -- do NOT pass a duration argument. Use `--delta` to control step size. Example: `idb ui swipe 200 600 200 200 --delta 10`
+
 ### 4. Wait Intelligently
 
 **NEVER use bare `sleep`.** Always use polling-based waiting:

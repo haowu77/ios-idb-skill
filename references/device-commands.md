@@ -29,8 +29,8 @@ idb uninstall com.example.myapp                  # Uninstall app
 ```bash
 idb ui tap X Y                                   # Tap at coordinates
 idb ui tap X Y --duration 2.0                    # Long press
-idb ui swipe X1 Y1 X2 Y2                        # Swipe gesture
-idb ui swipe X1 Y1 X2 Y2 --delta 20             # Swipe with step size
+idb ui swipe X1 Y1 X2 Y2                        # Swipe gesture (NO duration arg!)
+idb ui swipe X1 Y1 X2 Y2 --delta 20             # Swipe with step size (smaller = slower)
 idb ui text "hello world"                        # Type text
 idb ui button HOME                               # Home button
 idb ui button LOCK                               # Lock button

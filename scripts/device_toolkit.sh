@@ -148,15 +148,17 @@ def parse_elements(data, results, depth=0):
         return
     if not isinstance(data, dict):
         return
-    frame = data.get('frame', data.get('AXFrame', {}))
-    label = data.get('AXLabel', data.get('label', ''))
-    value = data.get('AXValue', data.get('value', ''))
-    role = data.get('role', data.get('AXRole', ''))
+    frame = data.get('frame', data.get('AXFrame', {})) or {}
+    label = data.get('AXLabel', data.get('label', None))
+    value = data.get('AXValue', data.get('value', None))
+    role = data.get('role', data.get('AXRole', '')) or ''
     enabled = data.get('enabled', data.get('AXEnabled', True))
-    x = frame.get('x', 0)
-    y = frame.get('y', 0)
-    w = frame.get('width', 0)
-    h = frame.get('height', 0)
+    label = str(label) if label is not None else ''
+    value = str(value) if value is not None else ''
+    x = frame.get('x', 0) or 0
+    y = frame.get('y', 0) or 0
+    w = frame.get('width', 0) or 0
+    h = frame.get('height', 0) or 0
 
     display = label or value or ''
     if display and (w > 0 and h > 0):
@@ -198,17 +200,20 @@ def find_element(data, keyword):
     if not isinstance(data, dict):
         return None
 
-    label = str(data.get('AXLabel', data.get('label', '')))
-    value = str(data.get('AXValue', data.get('value', '')))
-    title = str(data.get('AXTitle', data.get('title', '')))
-    frame = data.get('frame', data.get('AXFrame', {}))
+    label = data.get('AXLabel', data.get('label', None))
+    value = data.get('AXValue', data.get('value', None))
+    title = data.get('AXTitle', data.get('title', None))
+    label = str(label) if label is not None else ''
+    value = str(value) if value is not None else ''
+    title = str(title) if title is not None else ''
+    frame = data.get('frame', data.get('AXFrame', {})) or {}
 
     for text in [label, value, title]:
-        if re.search(re.escape(keyword), text, re.IGNORECASE):
-            x = frame.get('x', 0)
-            y = frame.get('y', 0)
-            w = frame.get('width', 0)
-            h = frame.get('height', 0)
+        if text and re.search(re.escape(keyword), text, re.IGNORECASE):
+            x = frame.get('x', 0) or 0
+            y = frame.get('y', 0) or 0
+            w = frame.get('width', 0) or 0
+            h = frame.get('height', 0) or 0
             if w > 0 and h > 0:
                 cx = int(x + w / 2)
                 cy = int(y + h / 2)
