@@ -75,7 +75,7 @@ For each test case, follow this cycle strictly:
 device_shot
 ```
 
-Then view `/tmp/device_screen.png` to understand the current screen state.
+Then view `/tmp/device_screen.jpg` to understand the current screen state.
 
 ### 2. Find Elements
 

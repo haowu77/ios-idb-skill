@@ -149,7 +149,8 @@ ios-idb-skill/
 ├── SKILL.md                          # Skill instructions (Agent Skills standard)
 ├── README.md                         # This file
 ├── scripts/
-│   └── device_toolkit.sh             # Shell function library
+│   ├── device_toolkit.sh             # Shell function library
+│   └── setup.sh                      # Dependency installer
 └── references/
     └── device-commands.md            # idb commands reference
 ```

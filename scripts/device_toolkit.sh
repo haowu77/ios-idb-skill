@@ -8,6 +8,8 @@
 if [ -z "$_DEVICE_TOOLKIT_LOADED" ]; then
   IDB_TARGET=""
   IDB_SHOT_SIZE="750"
+  IDB_SCREEN_W=""
+  IDB_SCREEN_H=""
 fi
 
 # ============ Dependency Check ============
@@ -20,6 +22,10 @@ _check_deps() {
   fi
   if ! command -v idb &>/dev/null; then
     echo "idb client not found."
+    missing=1
+  fi
+  if ! command -v python3 &>/dev/null; then
+    echo "python3 not found."
     missing=1
   fi
   if [ $missing -eq 1 ]; then
@@ -36,53 +42,48 @@ _check_deps() {
 device_init() {
   _check_deps || return 1
 
-  local targets
-  targets=$(idb list-targets --json 2>/dev/null)
-  if [ -z "$targets" ] || [ "$targets" = "[]" ]; then
-    echo "No iOS targets found."
-    echo ""
-    echo "To start a simulator:"
-    echo "  xcrun simctl boot 'iPhone 16'"
-    echo ""
-    echo "For a real device: connect via USB with Developer Mode enabled."
-    return 1
+  echo "iOS Targets:"
+  echo ""
+  local i=1
+  local udids=()
+
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    local udid name state ttype os_ver
+    udid=$(echo "$line" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('udid',''))" 2>/dev/null)
+    name=$(echo "$line" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('name',''))" 2>/dev/null)
+    state=$(echo "$line" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('state',''))" 2>/dev/null)
+    ttype=$(echo "$line" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('type',''))" 2>/dev/null)
+    os_ver=$(echo "$line" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('os_version',''))" 2>/dev/null)
+
+    if [ -n "$udid" ]; then
+      echo "  [$i] $udid"
+      echo "      $name ($ttype) -- iOS $os_ver, $state"
+      udids+=("$udid")
+      i=$((i + 1))
+    fi
+  done < <(idb list-targets --json 2>/dev/null)
+
+  if [ ${#udids[@]} -eq 0 ]; then
+    # Fallback: try non-JSON listing
+    local plain
+    plain=$(idb list-targets 2>/dev/null)
+    if [ -z "$plain" ]; then
+      echo "No iOS targets found."
+      echo ""
+      echo "To start a simulator:"
+      echo "  xcrun simctl boot 'iPhone 16'"
+      echo ""
+      echo "For a real device: connect via USB with Developer Mode enabled."
+      return 1
+    fi
+    echo "$plain"
   fi
 
-  echo "iOS Targets:"
-  local i=1
-  echo "$targets" | python3 -c "
-import sys, json
-for line in sys.stdin:
-    line = line.strip()
-    if not line: continue
-    try:
-        t = json.loads(line)
-    except: continue
-    udid = t.get('udid', 'unknown')
-    name = t.get('name', 'unknown')
-    state = t.get('state', 'unknown')
-    ttype = t.get('type', 'unknown')
-    os_ver = t.get('os_version', 'unknown')
-    arch = t.get('architecture', '')
-    print(f'  [{sys.stdout.write(\"\") or i}] {udid}')
-    print(f'      {name} ({ttype}) -- iOS {os_ver}, {state}')
-    i = i + 1 if 'i' in dir() else 2
-" 2>/dev/null || {
-    # Fallback: non-JSON mode
-    echo "$targets" | while IFS= read -r line; do
-      echo "  [$i] $line"
-      i=$((i + 1))
-    done
-  }
-
-  # Simpler listing approach
-  echo ""
-  echo "--- Target List ---"
-  idb list-targets 2>/dev/null
   echo ""
   echo "Resolution: [A] 1000px  [B] 750px (recommended)  [C] 500px  [D] 350px"
   echo ""
-  echo "Pick target UDID + resolution, e.g. copy UDID then type resolution letter."
+  echo "Pick target number + resolution, e.g. '1 B'"
 }
 
 device_select() {
@@ -105,10 +106,28 @@ device_select() {
     *)        IDB_SHOT_SIZE=750 ;;
   esac
 
+  # Detect screen size for dynamic swipe coordinates
+  _detect_screen_size
+
   local name
   name=$(idb describe --udid "$IDB_TARGET" 2>/dev/null | head -5)
-  echo "Target set: $IDB_TARGET @ ${IDB_SHOT_SIZE}px"
+  echo "Target set: $IDB_TARGET @ ${IDB_SHOT_SIZE}px (screen: ${IDB_SCREEN_W}x${IDB_SCREEN_H})"
   echo "$name"
+}
+
+_detect_screen_size() {
+  # Get screen size from a quick screenshot
+  local raw_info
+  _idb screenshot /tmp/_device_size_probe.png 2>/dev/null
+  if [ -f /tmp/_device_size_probe.png ]; then
+    raw_info=$(sips -g pixelWidth -g pixelHeight /tmp/_device_size_probe.png 2>/dev/null)
+    IDB_SCREEN_W=$(echo "$raw_info" | grep pixelWidth | awk '{print $2}')
+    IDB_SCREEN_H=$(echo "$raw_info" | grep pixelHeight | awk '{print $2}')
+    rm -f /tmp/_device_size_probe.png
+  fi
+  # Fallback to common iPhone dimensions
+  IDB_SCREEN_W=${IDB_SCREEN_W:-390}
+  IDB_SCREEN_H=${IDB_SCREEN_H:-844}
 }
 
 # ============ idb Wrapper ============
@@ -125,7 +144,14 @@ _idb() {
 
 device_shot() {
   local size=${1:-$IDB_SHOT_SIZE}
-  _idb screenshot /tmp/device_raw.png 2>/dev/null
+  if ! _idb screenshot /tmp/device_raw.png 2>/dev/null; then
+    echo "ERROR: screenshot failed. Is the target booted?" >&2
+    return 1
+  fi
+  if [ ! -s /tmp/device_raw.png ]; then
+    echo "ERROR: screenshot file is empty" >&2
+    return 1
+  fi
   sips -Z "$size" /tmp/device_raw.png --out /tmp/device_screen.jpg -s format jpeg -s formatOptions 85 2>/dev/null
   echo "/tmp/device_screen.jpg"
 }
@@ -133,12 +159,18 @@ device_shot() {
 # ============ UI Tree (Accessibility) ============
 
 device_dump() {
-  _idb ui describe-all 2>/dev/null > /tmp/ios_ui_tree.json
+  local output
+  output=$(_idb ui describe-all 2>&1)
+  if [ -z "$output" ]; then
+    echo "ERROR: describe-all returned empty output. Is the target booted?" >&2
+    return 1
+  fi
+  echo "$output" > /tmp/ios_ui_tree.json
 }
 
 device_list() {
-  device_dump
-  python3 -c "
+  device_dump || return 1
+  python3 << 'PYEOF'
 import json, sys
 
 def parse_elements(data, results, depth=0):
@@ -152,7 +184,6 @@ def parse_elements(data, results, depth=0):
     label = data.get('AXLabel', data.get('label', None))
     value = data.get('AXValue', data.get('value', None))
     role = data.get('role', data.get('AXRole', '')) or ''
-    enabled = data.get('enabled', data.get('AXEnabled', True))
     label = str(label) if label is not None else ''
     value = str(value) if value is not None else ''
     x = frame.get('x', 0) or 0
@@ -164,7 +195,7 @@ def parse_elements(data, results, depth=0):
     if display and (w > 0 and h > 0):
         cx = int(x + w / 2)
         cy = int(y + h / 2)
-        results.append(f'{role:20s} \"{display}\"  [{int(x)},{int(y)}][{int(x+w)},{int(y+h)}]  center=({cx},{cy})')
+        results.append(f'{role:20s} "{display}"  [{int(x)},{int(y)}][{int(x+w)},{int(y+h)}]  center=({cx},{cy})')
     for child in data.get('children', data.get('AXChildren', [])):
         parse_elements(child, results, depth + 1)
 
@@ -177,24 +208,34 @@ try:
         print(r)
     if len(results) > 50:
         print(f'... and {len(results) - 50} more elements')
-except Exception as e:
-    print(f'Parse error: {e}')
-    print('Raw output:')
+    if not results:
+        print('(no interactive elements found)')
+except json.JSONDecodeError:
+    print('ERROR: UI tree is not valid JSON')
     with open('/tmp/ios_ui_tree.json') as f:
-        print(f.read()[:3000])
-" 2>/dev/null
+        print(f.read()[:2000])
+except Exception as e:
+    print(f'ERROR: {e}')
+PYEOF
 }
 
 device_find() {
   local keyword="$1"
-  device_dump
-  python3 -c "
-import json, sys, re
+  if [ -z "$keyword" ]; then
+    echo "Usage: device_find \"element text\"" >&2
+    return 1
+  fi
+  device_dump || return 1
+  # Pass keyword via environment variable to avoid shell injection
+  IDB_FIND_KEYWORD="$keyword" python3 << 'PYEOF'
+import json, sys, re, os
 
-def find_element(data, keyword):
+keyword = os.environ.get('IDB_FIND_KEYWORD', '')
+
+def find_element(data):
     if isinstance(data, list):
         for item in data:
-            result = find_element(item, keyword)
+            result = find_element(item)
             if result: return result
         return None
     if not isinstance(data, dict):
@@ -220,23 +261,26 @@ def find_element(data, keyword):
                 return f'{cx} {cy}'
 
     for child in data.get('children', data.get('AXChildren', [])):
-        result = find_element(child, keyword)
+        result = find_element(child)
         if result: return result
     return None
 
 try:
     with open('/tmp/ios_ui_tree.json') as f:
         tree = json.load(f)
-    result = find_element(tree, '$keyword')
+    result = find_element(tree)
     if result:
         print(result)
     else:
-        print('NOT_FOUND: \'$keyword\'')
+        print(f"NOT_FOUND: '{keyword}'")
         sys.exit(1)
-except Exception as e:
-    print(f'NOT_FOUND: \'$keyword\' (error: {e})')
+except json.JSONDecodeError:
+    print(f"NOT_FOUND: '{keyword}' (invalid JSON from describe-all)")
     sys.exit(1)
-" 2>/dev/null
+except Exception as e:
+    print(f"NOT_FOUND: '{keyword}' (error: {e})")
+    sys.exit(1)
+PYEOF
 }
 
 # ============ Wait ============
@@ -284,24 +328,40 @@ device_input() {
 
 device_type() {
   device_tap "$1" || return 1
-  sleep 0.5
+  # Poll for keyboard appearance instead of bare sleep
+  local attempts=0
+  while [ $attempts -lt 10 ]; do
+    # idb doesn't have a direct keyboard check; use a short delay with polling
+    sleep 0.3
+    attempts=$((attempts + 1))
+    # After 0.3s the keyboard is typically ready
+    if [ $attempts -ge 2 ]; then break; fi
+  done
   device_input "$2"
 }
 
 device_swipe() {
-  # Default coordinates for a typical iPhone screen (390x844 logical points)
+  # Use dynamic screen size (detected during device_select)
+  local w=${IDB_SCREEN_W:-390}
+  local h=${IDB_SCREEN_H:-844}
+  local mid_x=$((w / 2))
+  local mid_y=$((h / 2))
+  local margin=$((w / 10))
+
   case "$1" in
-    left)  _idb ui swipe 350 422 50 422 2>/dev/null ;;
-    right) _idb ui swipe 50 422 350 422 2>/dev/null ;;
-    up)    _idb ui swipe 195 650 195 200 2>/dev/null ;;
-    down)  _idb ui swipe 195 200 195 650 2>/dev/null ;;
+    left)  _idb ui swipe $((w - margin)) $mid_y $margin $mid_y 2>/dev/null ;;
+    right) _idb ui swipe $margin $mid_y $((w - margin)) $mid_y 2>/dev/null ;;
+    up)    _idb ui swipe $mid_x $((h * 3 / 4)) $mid_x $((h / 4)) 2>/dev/null ;;
+    down)  _idb ui swipe $mid_x $((h / 4)) $mid_x $((h * 3 / 4)) 2>/dev/null ;;
     *)     echo "Usage: device_swipe left|right|up|down" ;;
   esac
 }
 
 device_back() {
   # iOS back gesture: swipe from left edge to right
-  _idb ui swipe 5 422 200 422 2>/dev/null
+  local h=${IDB_SCREEN_H:-844}
+  local mid_y=$((h / 2))
+  _idb ui swipe 5 $mid_y 200 $mid_y 2>/dev/null
   echo "Back gesture (swipe from left edge)"
 }
 
@@ -339,6 +399,10 @@ device_mark() {
 
 device_logs() {
   local filter="${1:-.}" logfile="${2:-/tmp/ios_app.log}"
+  if [ ! -f "$logfile" ]; then
+    echo "No log file found. Start logging with: device_log_stream"
+    return 1
+  fi
   local mark=$(grep -n "^===" "$logfile" 2>/dev/null | tail -1 | cut -d: -f1)
   if [ -n "$mark" ]; then
     tail -n +$mark "$logfile" | grep -i "$filter"
