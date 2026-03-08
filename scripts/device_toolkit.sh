@@ -44,28 +44,38 @@ device_init() {
 
   echo "iOS Targets:"
   echo ""
-  local i=1
-  local udids=()
 
-  while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    local udid name state ttype os_ver
-    udid=$(echo "$line" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('udid',''))" 2>/dev/null)
-    name=$(echo "$line" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('name',''))" 2>/dev/null)
-    state=$(echo "$line" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('state',''))" 2>/dev/null)
-    ttype=$(echo "$line" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('type',''))" 2>/dev/null)
-    os_ver=$(echo "$line" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('os_version',''))" 2>/dev/null)
+  # Parse all targets in a single python3 call
+  local listing
+  listing=$(idb list-targets --json 2>/dev/null | python3 << 'PYEOF'
+import sys, json
 
-    if [ -n "$udid" ]; then
-      echo "  [$i] $udid"
-      echo "      $name ($ttype) -- iOS $os_ver, $state"
-      udids+=("$udid")
-      i=$((i + 1))
-    fi
-  done < <(idb list-targets --json 2>/dev/null)
+lines = sys.stdin.read().strip().splitlines()
+i = 1
+for line in lines:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        t = json.loads(line)
+    except:
+        continue
+    udid = t.get('udid', '')
+    name = t.get('name', 'unknown')
+    state = t.get('state', 'unknown')
+    ttype = t.get('type', 'unknown')
+    os_ver = t.get('os_version', 'unknown')
+    if udid:
+        print(f'  [{i}] {udid}')
+        print(f'      {name} ({ttype}) -- iOS {os_ver}, {state}')
+        i += 1
+if i == 1:
+    sys.exit(1)
+PYEOF
+  )
 
-  if [ ${#udids[@]} -eq 0 ]; then
-    # Fallback: try non-JSON listing
+  if [ $? -ne 0 ] || [ -z "$listing" ]; then
+    # Fallback: try plain listing
     local plain
     plain=$(idb list-targets 2>/dev/null)
     if [ -z "$plain" ]; then
@@ -78,12 +88,14 @@ device_init() {
       return 1
     fi
     echo "$plain"
+  else
+    echo "$listing"
   fi
 
   echo ""
   echo "Resolution: [A] 1000px  [B] 750px (recommended)  [C] 500px  [D] 350px"
   echo ""
-  echo "Pick target number + resolution, e.g. '1 B'"
+  echo "Pick target UDID + resolution, e.g. copy the UDID then type resolution letter."
 }
 
 device_select() {
@@ -109,21 +121,18 @@ device_select() {
   # Detect screen size for dynamic swipe coordinates
   _detect_screen_size
 
-  local name
-  name=$(idb describe --udid "$IDB_TARGET" 2>/dev/null | head -5)
   echo "Target set: $IDB_TARGET @ ${IDB_SHOT_SIZE}px (screen: ${IDB_SCREEN_W}x${IDB_SCREEN_H})"
-  echo "$name"
 }
 
 _detect_screen_size() {
-  # Get screen size from a quick screenshot
-  local raw_info
-  _idb screenshot /tmp/_device_size_probe.png 2>/dev/null
-  if [ -f /tmp/_device_size_probe.png ]; then
-    raw_info=$(sips -g pixelWidth -g pixelHeight /tmp/_device_size_probe.png 2>/dev/null)
-    IDB_SCREEN_W=$(echo "$raw_info" | grep pixelWidth | awk '{print $2}')
-    IDB_SCREEN_H=$(echo "$raw_info" | grep pixelHeight | awk '{print $2}')
-    rm -f /tmp/_device_size_probe.png
+  # Try to get screen size from idb describe (no screenshot needed)
+  local desc
+  desc=$(_idb describe 2>/dev/null)
+  local dims
+  dims=$(echo "$desc" | grep -oE '[0-9]+x[0-9]+' | head -1)
+  if [ -n "$dims" ]; then
+    IDB_SCREEN_W=$(echo "$dims" | cut -dx -f1)
+    IDB_SCREEN_H=$(echo "$dims" | cut -dx -f2)
   fi
   # Fallback to common iPhone dimensions
   IDB_SCREEN_W=${IDB_SCREEN_W:-390}
@@ -152,7 +161,10 @@ device_shot() {
     echo "ERROR: screenshot file is empty" >&2
     return 1
   fi
-  sips -Z "$size" /tmp/device_raw.png --out /tmp/device_screen.jpg -s format jpeg -s formatOptions 85 2>/dev/null
+  if ! sips -Z "$size" /tmp/device_raw.png --out /tmp/device_screen.jpg -s format jpeg -s formatOptions 85 2>/dev/null; then
+    echo "ERROR: image compression failed" >&2
+    return 1
+  fi
   echo "/tmp/device_screen.jpg"
 }
 
@@ -328,15 +340,8 @@ device_input() {
 
 device_type() {
   device_tap "$1" || return 1
-  # Poll for keyboard appearance instead of bare sleep
-  local attempts=0
-  while [ $attempts -lt 10 ]; do
-    # idb doesn't have a direct keyboard check; use a short delay with polling
-    sleep 0.3
-    attempts=$((attempts + 1))
-    # After 0.3s the keyboard is typically ready
-    if [ $attempts -ge 2 ]; then break; fi
-  done
+  # Brief delay for keyboard to appear (idb has no keyboard state query)
+  sleep 0.6
   device_input "$2"
 }
 
