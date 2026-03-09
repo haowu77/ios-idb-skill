@@ -144,16 +144,41 @@ _detect_screen_size() {
 # ============ idb Wrapper ============
 
 _idb() {
-  # idb requires --udid AFTER the subcommand(s), not as a global flag
-  # Append --udid at the end of the command, which works for all cases:
-  #   idb screenshot /tmp/out.png --udid UDID
-  #   idb ui describe-all --udid UDID
-  #   idb ui tap 100 200 --udid UDID
-  if [ -n "$IDB_TARGET" ]; then
-    idb "$@" --udid "$IDB_TARGET"
-  else
+  # idb requires --udid after subcommand(s) but before positional args.
+  # e.g., "idb ui text --udid UDID hello" NOT "idb ui text hello --udid UDID"
+  if [ -z "$IDB_TARGET" ]; then
     idb "$@"
+    return
   fi
+
+  # Determine how many leading args are subcommands
+  # Two-level: ui, file, crash, xctest, record
+  local subcmd_count=1
+  case "$1" in
+    ui|file|crash|xctest|record) subcmd_count=2 ;;
+  esac
+
+  # Build: idb [subcommands] --udid UDID [remaining args]
+  local cmd=(idb)
+  local count=0
+  for arg in "$@"; do
+    if [ $count -lt $subcmd_count ]; then
+      cmd+=("$arg")
+    else
+      break
+    fi
+    count=$((count + 1))
+  done
+  cmd+=(--udid "$IDB_TARGET")
+  count=0
+  for arg in "$@"; do
+    if [ $count -ge $subcmd_count ]; then
+      cmd+=("$arg")
+    fi
+    count=$((count + 1))
+  done
+
+  "${cmd[@]}"
 }
 
 # ============ Screenshot ============
