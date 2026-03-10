@@ -11,7 +11,7 @@ license: MIT
 compatibility: Requires idb (fb-idb) and idb_companion installed. macOS only. Uses sips for image compression.
 metadata:
   author: haowu77
-  version: "1.0.0"
+  version: "2.0.0"
 ---
 
 # iOS idb Skill
@@ -82,8 +82,11 @@ Then view `/tmp/device_screen.jpg` to understand the current screen state.
 ### 2. Find Elements
 
 ```bash
-device_find "Button Text"    # returns center x y coordinates
-device_list                   # show all interactive elements with bounds
+device_find "Button Text"          # returns center x y coordinates (best match)
+device_find "Button Text" "button" # find only buttons matching text
+device_find_all "Search"           # show ALL matching elements with roles and sizes
+device_list                        # show all interactive elements with bounds
+device_list 120                    # show up to 120 elements (default: 80)
 ```
 
 **NEVER guess coordinates.** Always use `device_find` or `device_list`.
@@ -91,16 +94,21 @@ device_list                   # show all interactive elements with bounds
 ### 3. Act
 
 ```bash
-device_tap "Button Text"      # find + tap in one step
-device_type "Field" "value"   # tap input field + type text
-device_input "raw text here"  # type text via idb ui text
-device_swipe left             # left | right | up | down
-device_back                   # swipe from left edge (iOS back gesture)
-device_home                   # press Home button
+device_tap "Button Text"           # find + tap in one step
+device_tap_xy 200 400              # tap at exact coordinates
+device_long_press "Globe"          # long press element (2s default)
+device_long_press "Globe" 1.0      # long press with custom duration
+device_long_press_xy 42 840 2.0    # long press at coordinates
+device_type "Field" "value"        # tap input field + type text
+device_input "raw text here"       # type text via idb ui text
+device_swipe left                  # left | right | up | down
+device_swipe_xy 100 400 300 400    # swipe between specific coordinates
+device_back                        # swipe from left edge (iOS back gesture)
+device_home                        # press Home button
 ```
 
 **CRITICAL: NEVER call `idb` commands directly.** Always use toolkit functions (`device_shot`, `device_tap`, `device_swipe`, etc.). The toolkit handles:
-- Screenshot compression (JPEG 85%, resized) -- raw `idb screenshot` produces oversized PNGs that exceed model image limits
+- Screenshot compression (JPEG 85%, resized) with retry + PNG validation
 - Correct argument formats -- e.g., `idb ui swipe` does NOT accept a duration positional arg, use `--delta` instead
 - Device targeting via `--udid` automatically
 
@@ -136,16 +144,34 @@ device_mark "TEST_NAME"            # insert marker before action
 device_logs "error|success"        # show logs since marker
 ```
 
+### 7. Clipboard (simulator only)
+
+```bash
+device_clipboard_set "text to copy"    # set simulator pasteboard
+device_clipboard_get                   # read simulator pasteboard
+```
+
+### 8. App Management
+
+```bash
+device_app_launch com.example.app      # launch app
+device_app_terminate com.example.app   # terminate app
+device_app_install /path/to/app.app    # install app
+device_app_uninstall com.example.app   # uninstall app
+device_app_list                        # list installed apps
+device_open_url "https://example.com"  # open URL / deep link
+```
+
 ## Rules
 
 1. **No direct `idb` / `xcrun simctl` / `adb` calls** -- ALWAYS use toolkit functions
 2. **No bare `sleep`** -- always `device_wait` / `device_wait_gone`
 3. **No coordinate guessing** -- always `device_find` / `device_list`
-3. **Always screenshot after actions** to verify results
-4. **Mark logs before actions** so you can filter relevant entries
-5. **If `device_find` returns NOT_FOUND**, screenshot first to see actual screen state
-6. **If an action fails twice**, stop and analyze -- don't retry blindly
-7. **This skill is generic** -- do NOT assume any specific app. Only operate on what the user asks.
+4. **Always screenshot after actions** to verify results
+5. **Mark logs before actions** so you can filter relevant entries
+6. **If `device_find` returns NOT_FOUND**, screenshot first to see actual screen state
+7. **If an action fails twice**, stop and analyze -- don't retry blindly
+8. **This skill is generic** -- do NOT assume any specific app. Only operate on what the user asks.
 
 ## Bug Fix Flow
 

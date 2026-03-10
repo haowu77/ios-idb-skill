@@ -1,5 +1,5 @@
 #!/bin/bash
-# iOS idb Device Toolkit
+# iOS idb Device Toolkit v2.0
 # Works with simulators and real iOS devices via Meta's idb
 # Requires: idb (fb-idb) + idb_companion installed
 # Usage: source device_toolkit.sh
@@ -45,7 +45,6 @@ device_init() {
   echo "iOS Targets:"
   echo ""
 
-  # Parse all targets in a single python3 call
   local listing
   listing=$(idb list-targets --json 2>/dev/null | python3 << 'PYEOF'
 import sys, json
@@ -75,7 +74,6 @@ PYEOF
   )
 
   if [ $? -ne 0 ] || [ -z "$listing" ]; then
-    # Fallback: try plain listing
     local plain
     plain=$(idb list-targets 2>/dev/null)
     if [ -z "$plain" ]; then
@@ -102,7 +100,6 @@ device_select() {
   local udid="$1"
   local res="$2"
 
-  # Verify target exists
   if ! idb describe --udid "$udid" >/dev/null 2>&1; then
     echo "ERROR: target '$udid' not found or not booted"
     return 1
@@ -118,15 +115,12 @@ device_select() {
     *)        IDB_SHOT_SIZE=750 ;;
   esac
 
-  # Detect screen size for dynamic swipe coordinates
   _detect_screen_size
 
   echo "Target set: $IDB_TARGET @ ${IDB_SHOT_SIZE}px (screen: ${IDB_SCREEN_W}x${IDB_SCREEN_H})"
 }
 
 _detect_screen_size() {
-  # Get logical point dimensions from idb describe
-  # Output contains: width_points=393, height_points=852
   local desc
   desc=$(_idb describe 2>/dev/null)
   local wp hp
@@ -136,7 +130,6 @@ _detect_screen_size() {
     IDB_SCREEN_W="$wp"
     IDB_SCREEN_H="$hp"
   fi
-  # Fallback to common iPhone dimensions
   IDB_SCREEN_W=${IDB_SCREEN_W:-390}
   IDB_SCREEN_H=${IDB_SCREEN_H:-844}
 }
@@ -144,21 +137,16 @@ _detect_screen_size() {
 # ============ idb Wrapper ============
 
 _idb() {
-  # idb requires --udid after subcommand(s) but before positional args.
-  # e.g., "idb ui text --udid UDID hello" NOT "idb ui text hello --udid UDID"
   if [ -z "$IDB_TARGET" ]; then
     idb "$@"
     return
   fi
 
-  # Determine how many leading args are subcommands
-  # Two-level: ui, file, crash, xctest, record
   local subcmd_count=1
   case "$1" in
     ui|file|crash|xctest|record) subcmd_count=2 ;;
   esac
 
-  # Build: idb [subcommands] --udid UDID [remaining args]
   local cmd=(idb)
   local count=0
   for arg in "$@"; do
@@ -181,22 +169,56 @@ _idb() {
   "${cmd[@]}"
 }
 
-# ============ Screenshot ============
+# ============ Screenshot (with retry + validation) ============
 
 device_shot() {
   local size=${1:-$IDB_SHOT_SIZE}
-  rm -f /tmp/device_raw.png
-  local shot_err
-  shot_err=$(_idb screenshot /tmp/device_raw.png 2>&1)
-  if [ ! -s /tmp/device_raw.png ]; then
-    echo "ERROR: screenshot failed: $shot_err" >&2
+  local max_retries=3
+  local attempt=0
+
+  while [ $attempt -lt $max_retries ]; do
+    attempt=$((attempt + 1))
+    rm -f /tmp/device_raw.png
+
+    local shot_err
+    shot_err=$(_idb screenshot /tmp/device_raw.png 2>&1)
+
+    # Check file exists and has content
+    if [ ! -s /tmp/device_raw.png ]; then
+      if [ $attempt -lt $max_retries ]; then
+        sleep 0.5
+        continue
+      fi
+      echo "ERROR: screenshot failed after $max_retries attempts: $shot_err" >&2
+      return 1
+    fi
+
+    # Validate it's actually a PNG (first 4 bytes: 89 50 4E 47)
+    local magic
+    magic=$(xxd -l 4 -p /tmp/device_raw.png 2>/dev/null)
+    if [ "$magic" != "89504e47" ]; then
+      if [ $attempt -lt $max_retries ]; then
+        sleep 0.5
+        continue
+      fi
+      echo "ERROR: screenshot file is not a valid PNG (magic: $magic)" >&2
+      return 1
+    fi
+
+    # Compress to JPEG
+    if sips -Z "$size" /tmp/device_raw.png --out /tmp/device_screen.jpg \
+        -s format jpeg -s formatOptions 85 >/dev/null 2>&1; then
+      echo "/tmp/device_screen.jpg"
+      return 0
+    fi
+
+    if [ $attempt -lt $max_retries ]; then
+      sleep 0.5
+      continue
+    fi
+    echo "ERROR: image compression failed (sips)" >&2
     return 1
-  fi
-  if ! sips -Z "$size" /tmp/device_raw.png --out /tmp/device_screen.jpg -s format jpeg -s formatOptions 85 >/dev/null 2>&1; then
-    echo "ERROR: image compression failed" >&2
-    return 1
-  fi
-  echo "/tmp/device_screen.jpg"
+  done
 }
 
 # ============ UI Tree (Accessibility) ============
@@ -208,26 +230,23 @@ device_dump() {
     echo "ERROR: describe-all returned empty output. Is the target booted?" >&2
     return 1
   fi
-  # idb sometimes outputs raw newlines inside JSON string values (invalid JSON)
-  # Replace literal newlines within strings with \n escape
   echo "$output" | python3 -c "
 import sys
 raw = sys.stdin.buffer.read()
-# Fix: replace actual newlines that appear inside JSON strings
-# Strategy: since idb outputs a flat JSON array on one logical line,
-# any newline within the data is inside a string value
 text = raw.decode('utf-8', errors='replace')
 lines = text.splitlines()
-# Join all lines as they should be one JSON blob
 joined = ' '.join(lines)
 sys.stdout.write(joined)
 " > /tmp/ios_ui_tree.json 2>/dev/null
 }
 
 device_list() {
+  local max_items=${1:-80}
   device_dump || return 1
-  python3 << 'PYEOF'
-import json, sys
+  IDB_LIST_MAX="$max_items" python3 << 'PYEOF'
+import json, sys, os
+
+max_items = int(os.environ.get('IDB_LIST_MAX', '80'))
 
 def parse_elements(data, results, depth=0):
     if isinstance(data, list):
@@ -247,8 +266,14 @@ def parse_elements(data, results, depth=0):
     w = frame.get('width', 0) or 0
     h = frame.get('height', 0) or 0
 
+    # Skip invisible or tiny elements
+    if w < 5 or h < 5:
+        for child in data.get('children', data.get('AXChildren', [])):
+            parse_elements(child, results, depth + 1)
+        return
+
     display = label or value or ''
-    if display and (w > 0 and h > 0):
+    if display:
         cx = int(x + w / 2)
         cy = int(y + h / 2)
         results.append(f'{role:20s} "{display}"  [{int(x)},{int(y)}][{int(x+w)},{int(y+h)}]  center=({cx},{cy})')
@@ -260,10 +285,10 @@ try:
         tree = json.load(f)
     results = []
     parse_elements(tree, results)
-    for r in results[:50]:
+    for r in results[:max_items]:
         print(r)
-    if len(results) > 50:
-        print(f'... and {len(results) - 50} more elements')
+    if len(results) > max_items:
+        print(f'... and {len(results) - max_items} more elements')
     if not results:
         print('(no interactive elements found)')
 except json.JSONDecodeError:
@@ -275,64 +300,163 @@ except Exception as e:
 PYEOF
 }
 
+# ============ Find Elements ============
+
 device_find() {
   local keyword="$1"
+  local role_filter="${2:-}"  # Optional: "button", "textfield", "statictext", etc.
   if [ -z "$keyword" ]; then
-    echo "Usage: device_find \"element text\"" >&2
+    echo "Usage: device_find \"element text\" [role]" >&2
     return 1
   fi
   device_dump || return 1
-  # Pass keyword via environment variable to avoid shell injection
-  IDB_FIND_KEYWORD="$keyword" python3 << 'PYEOF'
+  IDB_FIND_KEYWORD="$keyword" IDB_FIND_ROLE="$role_filter" python3 << 'PYEOF'
 import json, sys, re, os
 
 keyword = os.environ.get('IDB_FIND_KEYWORD', '')
+role_filter = os.environ.get('IDB_FIND_ROLE', '').lower()
 
-def find_element(data):
+def find_all(data, results):
     if isinstance(data, list):
         for item in data:
-            result = find_element(item)
-            if result: return result
-        return None
+            find_all(item, results)
+        return
     if not isinstance(data, dict):
-        return None
+        return
 
     label = data.get('AXLabel', data.get('label', None))
     value = data.get('AXValue', data.get('value', None))
     title = data.get('AXTitle', data.get('title', None))
+    role = data.get('role', data.get('AXRole', '')) or ''
     label = str(label) if label is not None else ''
     value = str(value) if value is not None else ''
     title = str(title) if title is not None else ''
     frame = data.get('frame', data.get('AXFrame', {})) or {}
 
-    for text in [label, value, title]:
-        if text and re.search(re.escape(keyword), text, re.IGNORECASE):
-            x = frame.get('x', 0) or 0
-            y = frame.get('y', 0) or 0
-            w = frame.get('width', 0) or 0
-            h = frame.get('height', 0) or 0
-            if w > 0 and h > 0:
-                cx = int(x + w / 2)
-                cy = int(y + h / 2)
-                return f'{cx} {cy}'
+    x = frame.get('x', 0) or 0
+    y = frame.get('y', 0) or 0
+    w = frame.get('width', 0) or 0
+    h = frame.get('height', 0) or 0
+
+    if w < 5 or h < 5:
+        for child in data.get('children', data.get('AXChildren', [])):
+            find_all(child, results)
+        return
+
+    # Role filter
+    if role_filter and role_filter not in role.lower():
+        for child in data.get('children', data.get('AXChildren', [])):
+            find_all(child, results)
+        return
+
+    cx = int(x + w / 2)
+    cy = int(y + h / 2)
+    area = w * h
+    pat = re.escape(keyword)
+
+    for text in [label, title, value]:
+        if text and re.search(pat, text, re.IGNORECASE):
+            # Score: exact match > prefix > contains; larger area = more likely target
+            score = 0
+            if text.lower() == keyword.lower():
+                score = 1000  # exact match
+            elif text.lower().startswith(keyword.lower()):
+                score = 500   # prefix match
+            else:
+                score = 100   # contains match
+            # Prefer buttons and tappable elements
+            if 'button' in role.lower():
+                score += 50
+            results.append((score, cx, cy, role, text, int(w), int(h)))
+            break
 
     for child in data.get('children', data.get('AXChildren', [])):
-        result = find_element(child)
-        if result: return result
-    return None
+        find_all(child, results)
 
 try:
     with open('/tmp/ios_ui_tree.json') as f:
         tree = json.load(f)
-    result = find_element(tree)
-    if result:
-        print(result)
+    results = []
+    find_all(tree, results)
+    if results:
+        # Sort by score descending, pick best match
+        results.sort(key=lambda r: -r[0])
+        best = results[0]
+        print(f'{best[1]} {best[2]}')
     else:
         print(f"NOT_FOUND: '{keyword}'")
         sys.exit(1)
 except json.JSONDecodeError:
     print(f"NOT_FOUND: '{keyword}' (invalid JSON from describe-all)")
     sys.exit(1)
+except Exception as e:
+    print(f"NOT_FOUND: '{keyword}' (error: {e})")
+    sys.exit(1)
+PYEOF
+}
+
+# Find all matching elements (returns multiple results)
+device_find_all() {
+  local keyword="$1"
+  if [ -z "$keyword" ]; then
+    echo "Usage: device_find_all \"element text\"" >&2
+    return 1
+  fi
+  device_dump || return 1
+  IDB_FIND_KEYWORD="$keyword" python3 << 'PYEOF'
+import json, sys, re, os
+
+keyword = os.environ.get('IDB_FIND_KEYWORD', '')
+
+def find_all(data, results):
+    if isinstance(data, list):
+        for item in data:
+            find_all(item, results)
+        return
+    if not isinstance(data, dict):
+        return
+
+    label = data.get('AXLabel', data.get('label', None))
+    value = data.get('AXValue', data.get('value', None))
+    title = data.get('AXTitle', data.get('title', None))
+    role = data.get('role', data.get('AXRole', '')) or ''
+    label = str(label) if label is not None else ''
+    value = str(value) if value is not None else ''
+    title = str(title) if title is not None else ''
+    frame = data.get('frame', data.get('AXFrame', {})) or {}
+
+    x = frame.get('x', 0) or 0
+    y = frame.get('y', 0) or 0
+    w = frame.get('width', 0) or 0
+    h = frame.get('height', 0) or 0
+
+    if w < 5 or h < 5:
+        for child in data.get('children', data.get('AXChildren', [])):
+            find_all(child, results)
+        return
+
+    pat = re.escape(keyword)
+    for text in [label, title, value]:
+        if text and re.search(pat, text, re.IGNORECASE):
+            cx = int(x + w / 2)
+            cy = int(y + h / 2)
+            results.append(f'{role:20s} "{text}"  center=({cx},{cy})  [{int(w)}x{int(h)}]')
+            break
+
+    for child in data.get('children', data.get('AXChildren', [])):
+        find_all(child, results)
+
+try:
+    with open('/tmp/ios_ui_tree.json') as f:
+        tree = json.load(f)
+    results = []
+    find_all(tree, results)
+    if results:
+        for r in results:
+            print(r)
+    else:
+        print(f"NOT_FOUND: '{keyword}'")
+        sys.exit(1)
 except Exception as e:
     print(f"NOT_FOUND: '{keyword}' (error: {e})")
     sys.exit(1)
@@ -376,6 +500,26 @@ device_tap() {
 
 device_tap_xy() {
   _idb ui tap "$1" "$2" 2>/dev/null
+  echo "Tapped at ($1, $2)"
+}
+
+# Long press an element by text (default 2 seconds)
+device_long_press() {
+  local keyword="$1"
+  local duration="${2:-2.0}"
+  local coords=$(device_find "$keyword")
+  if [[ "$coords" == NOT_FOUND* ]]; then echo "NOT_FOUND: '$keyword'" >&2; return 1; fi
+  local x=$(echo $coords | cut -d' ' -f1)
+  local y=$(echo $coords | cut -d' ' -f2)
+  _idb ui tap "$x" "$y" --duration "$duration" 2>/dev/null
+  echo "Long-pressed '$keyword' at ($x, $y) for ${duration}s"
+}
+
+# Long press at specific coordinates
+device_long_press_xy() {
+  local x="$1" y="$2" duration="${3:-2.0}"
+  _idb ui tap "$x" "$y" --duration "$duration" 2>/dev/null
+  echo "Long-pressed at ($x, $y) for ${duration}s"
 }
 
 device_input() {
@@ -384,13 +528,11 @@ device_input() {
 
 device_type() {
   device_tap "$1" || return 1
-  # Brief delay for keyboard to appear (idb has no keyboard state query)
   sleep 0.6
   device_input "$2"
 }
 
 device_swipe() {
-  # Use dynamic screen size (detected during device_select)
   local w=${IDB_SCREEN_W:-390}
   local h=${IDB_SCREEN_H:-844}
   local mid_x=$((w / 2))
@@ -406,8 +548,12 @@ device_swipe() {
   esac
 }
 
+# Swipe between specific coordinates
+device_swipe_xy() {
+  _idb ui swipe "$1" "$2" "$3" "$4" 2>/dev/null
+}
+
 device_back() {
-  # iOS back gesture: swipe from left edge to right
   local h=${IDB_SCREEN_H:-844}
   local mid_y=$((h / 2))
   _idb ui swipe 5 $mid_y 200 $mid_y 2>/dev/null
@@ -426,6 +572,23 @@ device_siri() {
   _idb ui button SIRI 2>/dev/null
 }
 
+# ============ Clipboard ============
+
+# Copy text to device pasteboard (simulator only)
+device_clipboard_set() {
+  if [ -z "$1" ]; then
+    echo "Usage: device_clipboard_set \"text to copy\"" >&2
+    return 1
+  fi
+  xcrun simctl pbcopy "$IDB_TARGET" <<< "$1" 2>/dev/null
+  echo "Clipboard set: '${1:0:50}...'"
+}
+
+# Read device pasteboard (simulator only)
+device_clipboard_get() {
+  xcrun simctl pbpaste "$IDB_TARGET" 2>/dev/null
+}
+
 # ============ Compound ============
 
 device_tap_wait() {
@@ -434,8 +597,8 @@ device_tap_wait() {
 }
 
 device_step() {
-  device_tap "$1" || return 1
-  device_wait "$2" ${3:-30} || { device_shot; return 1; }
+  device_tap "$1" || { echo "FAILED: could not tap '$1'" >&2; device_shot; return 1; }
+  device_wait "$2" ${3:-30} || { echo "FAILED: '$2' did not appear" >&2; device_shot; return 1; }
   device_shot
 }
 
@@ -498,6 +661,13 @@ device_app_uninstall() {
 
 device_info() {
   _idb describe 2>/dev/null
+}
+
+# ============ URL / Deep Links ============
+
+device_open_url() {
+  _idb open "$1" 2>/dev/null
+  echo "Opened: $1"
 }
 
 # ============ Load Guard ============
